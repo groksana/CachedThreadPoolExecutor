@@ -1,6 +1,7 @@
 package com.gromoks.cachedthreadpool;
 
 import java.util.*;
+import java.util.Map.Entry;
 import java.util.concurrent.*;
 
 public class CachedThreadPoolExecutor implements ExecutorService {
@@ -9,6 +10,7 @@ public class CachedThreadPoolExecutor implements ExecutorService {
     private final Queue<Runnable> runnableTaskQueue = new LinkedList<>();
     private final Map<Thread, Long> threadPool;
     private volatile boolean isActive;
+    private final Long threadTimeoutMs = 10000L;
 
     private final Thread dutyThread;
 
@@ -36,7 +38,7 @@ public class CachedThreadPoolExecutor implements ExecutorService {
 
     @Override
     public List<Runnable> shutdownNow() {
-        List<Runnable> runnableList = new ArrayList<>();
+        List<Runnable> runnableList;
 
         shutdown();
 
@@ -44,7 +46,7 @@ public class CachedThreadPoolExecutor implements ExecutorService {
         dutyThread.interrupt();
 
         synchronized (runnableTaskQueue) {
-            runnableList.addAll(runnableTaskQueue);
+            runnableList = new ArrayList<>(runnableTaskQueue);
             runnableTaskQueue.clear();
         }
         return runnableList;
@@ -139,7 +141,7 @@ public class CachedThreadPoolExecutor implements ExecutorService {
     }
 
     public void printThreadState() {
-        for (Map.Entry<Thread, Long> element : threadPool.entrySet()) {
+        for (Entry<Thread, Long> element : threadPool.entrySet()) {
             System.out.println("Status of " + element.getKey().getName()
                     + " - " + element.getKey().getState() + " - " + element.getKey().isAlive());
         }
@@ -148,26 +150,28 @@ public class CachedThreadPoolExecutor implements ExecutorService {
     private void threadInit() {
         Runnable taskRunner = this::taskRunner;
         Thread thread = new Thread(taskRunner);
-        threadPool.put(thread, 0L);
+        threadPool.put(thread, INIT_TIME_MS);
         thread.start();
     }
 
     private void taskRunner() {
         while (!isTerminated()) {
             Runnable task;
+            Thread currentThread = Thread.currentThread();
 
             synchronized (runnableTaskQueue) {
                 while (runnableTaskQueue.isEmpty()) {
                     try {
-                        Thread currentThread = Thread.currentThread();
-                        threadPool.put(currentThread, System.currentTimeMillis());
+                        if (!currentThread.isInterrupted()) {
+                            threadPool.put(currentThread, System.currentTimeMillis());
+                        }
                         runnableTaskQueue.wait();
                         if (!isActive) {
                             break;
                         }
                     } catch (InterruptedException e) {
                         System.out.println("Thread with name " + Thread.currentThread().getName() + " interrupted by timeout: " + e);
-                        threadPool.remove(Thread.currentThread());
+                        Thread.currentThread().interrupt();
                         break;
                     }
                 }
@@ -192,17 +196,16 @@ public class CachedThreadPoolExecutor implements ExecutorService {
         while (isActive) {
             Long currentTimeMs = System.currentTimeMillis();
 
-            for (Map.Entry<Thread, Long> element : threadPool.entrySet()) {
-                Thread currentThread = element.getKey();
+            Iterator<Entry<Thread, Long>> iterator = threadPool.entrySet().iterator();
 
-                if ((currentTimeMs - element.getValue() > 10000) && !INIT_TIME_MS.equals(element.getValue())) {
+            while (iterator.hasNext()) {
+                Entry<Thread, Long> pair = iterator.next();
+                Thread currentThread = pair.getKey();
+
+                if ((currentTimeMs - pair.getValue() > threadTimeoutMs) && !INIT_TIME_MS.equals(pair.getValue())) {
                     currentThread.interrupt();
-                    System.out.println(currentThread);
-                    System.out.println("1 size = " + threadPool.size());
-                    threadPool.remove(currentThread);
-                    System.out.println("2 size = " + threadPool.size());
-                    System.out.println("Thread with name " + currentThread.getName() + " and time - " + element.getValue()
-                            + " has been interrupt at " + System.currentTimeMillis());
+                    iterator.remove();
+                    System.out.println("Thread with name " + currentThread.getName() + " has been interrupted");
                 }
             }
         }
@@ -210,11 +213,11 @@ public class CachedThreadPoolExecutor implements ExecutorService {
 
     private boolean isAnyAvailableThread() {
         int count = 0;
-        for (Map.Entry<Thread, Long> element : threadPool.entrySet()) {
-            System.out.println("Check available thread = " + element.getKey().getName() + " - " + element.getKey().getState());
-            if (element.getKey().isAlive() && (element.getKey().getState() != Thread.State.RUNNABLE)
-                    && (element.getKey().getState() != Thread.State.BLOCKED)) {
-                System.out.println("!!!Available Thread State = " + element.getKey().getState());
+        for (Entry<Thread, Long> element : threadPool.entrySet()) {
+            Thread currentThread = element.getKey();
+            if (currentThread.isAlive()
+                    && (currentThread.getState() != Thread.State.RUNNABLE)
+                    && (currentThread.getState() != Thread.State.BLOCKED)) {
                 count++;
                 break;
             }
